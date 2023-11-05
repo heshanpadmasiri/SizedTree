@@ -50,20 +50,33 @@ fn print_and_deallocate_entries(allocator: std.mem.Allocator, entries: ArrayList
     entries.deinit();
 }
 
-fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) std.os.WriteError!void {
+fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) (std.os.WriteError || std.mem.Allocator.Error)!void {
+    const prefix = try create_prefix(allocator, depth);
     switch (entry) {
         .file => |file_entry| {
             const basename = file_entry.basename;
-            try stdOut.writer().print("file: {s}\n", .{basename});
+            try stdOut.writer().print("{s}-- {s}\n", .{ prefix, basename });
             allocator.free(basename);
         },
         .directory => |directory_entry| {
             const basename = directory_entry.basename;
-            try stdOut.writer().print("dir:{s}\n", .{basename});
+            try stdOut.writer().print("{s}{s}\n", .{ prefix, basename });
             allocator.free(basename);
             try print_and_deallocate_entries(allocator, directory_entry.children, depth + 1);
         },
     }
+    allocator.free(prefix);
+}
+
+fn create_prefix(allocator: std.mem.Allocator, depth: usize) ![]const u8 {
+    var prefix = try allocator.alloc(u8, depth * 2);
+    // TODO:
+    for (0..depth) |i| {
+        const index = i * 2;
+        prefix[index] = '|';
+        prefix[index + 1] = ' ';
+    }
+    return prefix;
 }
 
 // TODO: This should return entries in a sorted order
