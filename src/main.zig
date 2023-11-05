@@ -26,6 +26,7 @@ pub fn main() !void {
     try print_and_deallocate_entries(allocator, entries, 0);
 }
 
+// Size is in kilobytes
 const DirectoryEntry = struct {
     basename: []const u8,
     size: usize,
@@ -41,7 +42,22 @@ const EntryTag = enum { file, directory };
 const Entry = union(EntryTag) {
     file: FileEntry,
     directory: DirectoryEntry,
+    fn size(self: Entry) usize {
+        switch (self) {
+            .file => |file_entry| {
+                return file_entry.size;
+            },
+            .directory => |directory_entry| {
+                return directory_entry.size;
+            },
+        }
+    }
 };
+
+fn entryLessThan(context: void, lhs: Entry, rhs: Entry) bool {
+    _ = context;
+    return lhs.size() < rhs.size();
+}
 
 fn print_and_deallocate_entries(allocator: std.mem.Allocator, entries: ArrayList(Entry), depth: usize) !void {
     for (entries.items) |entry| {
@@ -52,15 +68,16 @@ fn print_and_deallocate_entries(allocator: std.mem.Allocator, entries: ArrayList
 
 fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) (std.os.WriteError || std.mem.Allocator.Error)!void {
     const prefix = try create_prefix(allocator, depth);
+    const size = entry.size();
     switch (entry) {
         .file => |file_entry| {
             const basename = file_entry.basename;
-            try stdOut.writer().print("{s}-- {s}\n", .{ prefix, basename });
+            try stdOut.writer().print("{s}-- {s} {d}\n", .{ prefix, basename, size });
             allocator.free(basename);
         },
         .directory => |directory_entry| {
             const basename = directory_entry.basename;
-            try stdOut.writer().print("{s}{s}\n", .{ prefix, basename });
+            try stdOut.writer().print("{s}{s} {d}\n", .{ prefix, basename, size });
             allocator.free(basename);
             try print_and_deallocate_entries(allocator, directory_entry.children, depth + 1);
         },
@@ -69,8 +86,7 @@ fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) (std.os
 }
 
 fn create_prefix(allocator: std.mem.Allocator, depth: usize) ![]const u8 {
-    var prefix = try allocator.alloc(u8, depth * 2);
-    // TODO:
+    var prefix = try allocator.alloc(u8, depth * 2); // | + space
     for (0..depth) |i| {
         const index = i * 2;
         prefix[index] = '|';
@@ -85,20 +101,23 @@ fn walk_directory(allocator: std.mem.Allocator, path: []const u8) !ArrayList(Ent
     var it = dir.iterate();
     defer dir.close();
     var list = ArrayList(Entry).init(allocator);
-
     while (try it.next()) |entry| {
         var basename = try allocator.alloc(u8, entry.name.len);
         @memcpy(basename, entry.name.ptr);
-        const size = 0;
+        var file_path = try std.fs.path.join(allocator, &[_][]const u8{ path, basename });
+        defer allocator.free(file_path);
         switch (entry.kind) {
             FileKind.file => {
+                const size = try file_size(file_path);
                 const file_entry = Entry{ .file = FileEntry{ .basename = basename, .size = size } };
                 try list.append(file_entry);
             },
             FileKind.directory => {
-                var childPath = try std.fs.path.join(allocator, &[_][]const u8{ path, basename });
-                defer allocator.free(childPath);
-                const children = try walk_directory(allocator, childPath);
+                const children = try walk_directory(allocator, file_path);
+                var size: usize = 0;
+                for (children.items) |child| {
+                    size += child.size();
+                }
                 const directory_entry = Entry{ .directory = DirectoryEntry{
                     .basename = basename,
                     .size = size,
@@ -111,7 +130,14 @@ fn walk_directory(allocator: std.mem.Allocator, path: []const u8) !ArrayList(Ent
             },
         }
     }
+    std.mem.sort(Entry, list.items, {}, entryLessThan);
     return list;
+}
+
+fn file_size(path: []const u8) !usize {
+    var file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    return (try file.stat()).size;
 }
 
 fn print_message_and_exit(message: []const u8, status: u8) !void {
