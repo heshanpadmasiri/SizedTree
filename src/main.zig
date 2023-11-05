@@ -26,7 +26,7 @@ pub fn main() !void {
     try print_and_deallocate_entries(allocator, entries, 0);
 }
 
-// Size is in kilobytes
+// Size is in bytes
 const DirectoryEntry = struct {
     basename: []const u8,
     size: usize,
@@ -52,6 +52,17 @@ const Entry = union(EntryTag) {
             },
         }
     }
+
+    fn basename(self: Entry) []const u8 {
+        switch (self) {
+            .file => |file_entry| {
+                return file_entry.basename;
+            },
+            .directory => |directory_entry| {
+                return directory_entry.basename;
+            },
+        }
+    }
 };
 
 fn entryLessThan(context: void, lhs: Entry, rhs: Entry) bool {
@@ -68,21 +79,51 @@ fn print_and_deallocate_entries(allocator: std.mem.Allocator, entries: ArrayList
 
 fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) (std.os.WriteError || std.mem.Allocator.Error)!void {
     const prefix = try create_prefix(allocator, depth);
-    const size = entry.size();
+    const size = try human_readable_size(allocator, entry.size());
+    defer allocator.free(size);
+    const basename = entry.basename();
+    defer allocator.free(basename);
+    const spacer_text = try spacer(allocator, prefix.len, basename.len, size.len);
+    defer allocator.free(spacer_text);
+    try stdOut.writer().print("{s}-- {s}{s}{s}\n", .{ prefix, basename, spacer_text, size });
     switch (entry) {
-        .file => |file_entry| {
-            const basename = file_entry.basename;
-            try stdOut.writer().print("{s}-- {s} {d}\n", .{ prefix, basename, size });
-            allocator.free(basename);
-        },
         .directory => |directory_entry| {
-            const basename = directory_entry.basename;
-            try stdOut.writer().print("{s}{s} {d}\n", .{ prefix, basename, size });
-            allocator.free(basename);
             try print_and_deallocate_entries(allocator, directory_entry.children, depth + 1);
         },
+        else => {},
     }
     allocator.free(prefix);
+}
+
+fn spacer(allocator: std.mem.Allocator, prefix_len: usize, basename_len: usize, size_len: usize) ![]const u8 {
+    const total_len = prefix_len + "-- ".len + basename_len + size_len;
+    const remainder = 80 - total_len;
+    if (remainder <= 0) {
+        return "";
+    }
+    var buffer = try allocator.alloc(u8, remainder);
+    for (0..remainder) |i| {
+        buffer[i] = '.';
+    }
+    return buffer;
+}
+
+fn human_readable_size(allocator: std.mem.Allocator, size: usize) ![]const u8 {
+    var fs: f64 = @floatFromInt(size);
+    switch (size) {
+        0...1023 => {
+            return try std.fmt.allocPrint(allocator, "{d:.2} B", .{fs});
+        },
+        1024...(1024 * 1024 - 1) => {
+            return try std.fmt.allocPrint(allocator, "{d:.2} KB", .{fs / 1024.0});
+        },
+        1024 * 1024...1024 * 1024 * 1024 => {
+            return try std.fmt.allocPrint(allocator, "{d:.2} MB", .{fs / (1024.0 * 1024.0)});
+        },
+        else => {
+            return try std.fmt.allocPrint(allocator, "{d:.2} GB", .{fs / (1024.0 * 1024.0 * 1024.0)});
+        },
+    }
 }
 
 fn create_prefix(allocator: std.mem.Allocator, depth: usize) ![]const u8 {
@@ -95,7 +136,6 @@ fn create_prefix(allocator: std.mem.Allocator, depth: usize) ![]const u8 {
     return prefix;
 }
 
-// TODO: This should return entries in a sorted order
 fn walk_directory(allocator: std.mem.Allocator, path: []const u8) !ArrayList(Entry) {
     var dir = try std.fs.cwd().openIterableDir(path, .{ .access_sub_paths = false, .no_follow = true });
     var it = dir.iterate();
