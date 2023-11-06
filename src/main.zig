@@ -17,6 +17,9 @@ pub fn main() !void {
     // TODO: handle the case where use don't provide any path
     // For that we need to figure out the path from which user executed the binary
     // check `std.fs.cwd()`
+    // TODO: also allow controlling how deep we need the output to go
+    // (ideally we shouldn't check for files deeper than that either)
+    // FIXME: name too long (not sure what is causing it, other than handling deeply recursive directories)
     if (n_args != 2) {
         try print_message_and_exit("Please provide a path to a file", 1);
     }
@@ -142,6 +145,7 @@ fn walk_directory(allocator: std.mem.Allocator, path: []const u8) !ArrayList(Ent
     defer dir.close();
     var list = ArrayList(Entry).init(allocator);
     while (try it.next()) |entry| {
+        // TODO: this needs to be parallelized
         var basename = try allocator.alloc(u8, entry.name.len);
         @memcpy(basename, entry.name.ptr);
         var file_path = try std.fs.path.join(allocator, &[_][]const u8{ path, basename });
