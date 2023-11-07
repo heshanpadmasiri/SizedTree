@@ -7,7 +7,9 @@ const FileKind = std.fs.File.Kind;
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
-    defer _ = gpa.deinit();
+    // FIXME:
+    // I belive we have some how got a double free
+    // defer _ = gpa.deinit();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -85,7 +87,8 @@ fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) (std.os
     const size = try human_readable_size(allocator, entry.size());
     defer allocator.free(size);
     const basename = entry.basename();
-    defer allocator.free(basename);
+    // FIXME:
+    // defer allocator.free(basename);
     const spacer_text = try spacer(allocator, prefix.len, basename.len, size.len);
     defer allocator.free(spacer_text);
     try stdOut.writer().print("{s}-- {s}{s}{s}\n", .{ prefix, basename, spacer_text, size });
@@ -139,47 +142,80 @@ fn create_prefix(allocator: std.mem.Allocator, depth: usize) ![]const u8 {
     return prefix;
 }
 
+// TODO: walk directory should accept the array list as an argument and index in it
+// Then walk directory will update the index in it (this allows us to run the threads without locking)
+// But the first one don't know the index so we will split this walk_directory function to a top level one and inner one
 fn walk_directory(allocator: std.mem.Allocator, path: []const u8) !ArrayList(Entry) {
     var dir = try std.fs.cwd().openIterableDir(path, .{ .access_sub_paths = false, .no_follow = true });
-    var it = dir.iterate();
     defer dir.close();
-    var list = ArrayList(Entry).init(allocator);
+    var buffer = ArrayList(?Entry).init(allocator);
+    defer buffer.deinit();
+    try buffer.append(null);
+    try walk_directory_inner(allocator, dir, path, 0, buffer);
+    var entries = ArrayList(Entry).init(allocator);
+    // TODO: use a iterator
+    for (buffer.items) |entry| {
+        try entries.append(entry.?);
+    }
+    std.mem.sort(Entry, entries.items, {}, entryLessThan);
+    return entries;
+}
+
+const DirectoryTrampoline = struct {
+    index: usize,
+    directory_name: []const u8,
+};
+
+fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.IterableDir, directory_name: []const u8, index: usize, siblingBuffer: ArrayList(?Entry)) !void {
+    var dir = try parent_dir.dir.openIterableDir(directory_name, .{ .access_sub_paths = false, .no_follow = true });
+    defer dir.close();
+    var it = dir.iterate();
+    var buffer = ArrayList(?Entry).init(allocator);
+    defer buffer.deinit();
+    var child_directories = ArrayList(DirectoryTrampoline).init(allocator);
+    // TODO: Create a list to hold all directory entries
     while (try it.next()) |entry| {
         // TODO: this needs to be parallelized
         var basename = try allocator.alloc(u8, entry.name.len);
         @memcpy(basename, entry.name.ptr);
-        var file_path = try std.fs.path.join(allocator, &[_][]const u8{ path, basename });
-        defer allocator.free(file_path);
         switch (entry.kind) {
             FileKind.file => {
-                const size = try file_size(file_path);
+                const size = try file_size(dir.dir, basename);
                 const file_entry = Entry{ .file = FileEntry{ .basename = basename, .size = size } };
-                try list.append(file_entry);
+                try buffer.append(file_entry);
             },
             FileKind.directory => {
-                const children = try walk_directory(allocator, file_path);
-                var size: usize = 0;
-                for (children.items) |child| {
-                    size += child.size();
-                }
-                const directory_entry = Entry{ .directory = DirectoryEntry{
-                    .basename = basename,
-                    .size = size,
-                    .children = children,
-                } };
-                try list.append(directory_entry);
+                try child_directories.append(DirectoryTrampoline{ .index = buffer.items.len, .directory_name = basename });
+                try buffer.append(null);
             },
             else => {
                 // currently we ignore other cases
             },
         }
     }
-    std.mem.sort(Entry, list.items, {}, entryLessThan);
-    return list;
+    for (child_directories.items) |child| {
+        try walk_directory_inner(allocator, dir, child.directory_name, child.index, buffer);
+    }
+    var entries = ArrayList(Entry).init(allocator);
+    // TODO: use a iterator
+    for (buffer.items) |entry| {
+        try entries.append(entry.?);
+    }
+    var size: usize = 0;
+    for (entries.items) |child| {
+        size += child.size();
+    }
+    const directory_entry = Entry{ .directory = DirectoryEntry{
+        .basename = directory_name,
+        .size = size,
+        .children = entries,
+    } };
+    siblingBuffer.items[index] = directory_entry;
+    std.mem.sort(Entry, entries.items, {}, entryLessThan);
 }
 
-fn file_size(path: []const u8) !usize {
-    var file = try std.fs.cwd().openFile(path, .{});
+fn file_size(dir: std.fs.Dir, file_name: []const u8) !usize {
+    var file = try dir.openFile(file_name, .{});
     defer file.close();
     return (try file.stat()).size;
 }
