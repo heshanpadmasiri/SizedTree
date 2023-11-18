@@ -25,7 +25,6 @@ pub fn main() !void {
         try print_message_and_exit("Please provide a path to a file", 1);
     }
     const path = args[1];
-    // TODO: we should use some sort of thread pool to mitigate fork bombing our self
     const single_threaded = (n_args == 3) and std.mem.eql(u8, args[2], "--single-threaded");
     // TODO: pass in a areana allocator
     const entries = try walk_directory(allocator, path, single_threaded);
@@ -101,7 +100,6 @@ fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) (std.os
     }
 }
 
-
 fn spacer(allocator: std.mem.Allocator, prefix_len: usize, basename_len: usize, size_len: usize) ![]const u8 {
     const total_len = prefix_len + "-- ".len + basename_len + size_len;
     const remainder = 80 - total_len;
@@ -170,12 +168,7 @@ const ThreadPool = struct {
     result_buffer: []?Entry,
     dir: *std.fs.IterableDir,
     fn init(max_thread_count: usize, task: []DirectoryTrampoline, result_buffer: []?Entry, dir: *std.fs.IterableDir) ThreadPool {
-        return ThreadPool {
-            .max_thread_count = max_thread_count,
-            .tasks = task,
-            .result_buffer = result_buffer,
-            .dir = dir
-        };
+        return ThreadPool{ .max_thread_count = max_thread_count, .tasks = task, .result_buffer = result_buffer, .dir = dir };
     }
 
     fn run(self: ThreadPool, allocator: std.mem.Allocator) !void {
@@ -190,7 +183,7 @@ const ThreadPool = struct {
                 thread_index += 1;
             }
             const task = self.tasks[i];
-            var thread = try std.Thread.spawn(.{}, walk_directory_inner, .{allocator, self.dir.*, task.directory_name, task.index, self.result_buffer, self.max_thread_count == 1});
+            var thread = try std.Thread.spawn(.{}, walk_directory_inner, .{ allocator, self.dir.*, task.directory_name, task.index, self.result_buffer, self.max_thread_count == 1 });
             try threads.append(thread);
             i += 1;
         }
