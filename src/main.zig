@@ -149,7 +149,7 @@ fn walk_directory(allocator: std.mem.Allocator, path: []const u8, single_threade
     var buffer = ArrayList(?Entry).init(allocator);
     defer buffer.deinit();
     try buffer.append(null);
-    try walk_directory_inner(allocator, dir, try owned_heap_string(allocator, path), 0, buffer, single_threaded);
+    try walk_directory_inner(allocator, dir, try owned_heap_string(allocator, path), 0, buffer.items, single_threaded);
     var entries = ArrayList(Entry).init(allocator);
     // TODO: use a iterator
     for (buffer.items) |entry| {
@@ -164,7 +164,45 @@ const DirectoryTrampoline = struct {
     directory_name: []const u8,
 };
 
-fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.IterableDir, directory_name: []const u8, index: usize, siblingBuffer: ArrayList(?Entry), single_thread: bool) !void {
+const ThreadPool = struct {
+    max_thread_count: usize,
+    tasks: []DirectoryTrampoline,
+    result_buffer: []?Entry,
+    dir: *std.fs.IterableDir,
+    fn init(max_thread_count: usize, task: []DirectoryTrampoline, result_buffer: []?Entry, dir: *std.fs.IterableDir) ThreadPool {
+        return ThreadPool {
+            .max_thread_count = max_thread_count,
+            .tasks = task,
+            .result_buffer = result_buffer,
+            .dir = dir
+        };
+    }
+
+    fn run(self: ThreadPool, allocator: std.mem.Allocator) !void {
+        var threads = ArrayList(std.Thread).init(allocator); // how to get any of the queues to work in the fcking language
+        defer threads.deinit();
+        var i: usize = 0;
+        var thread_index: usize = 0;
+        while (i < self.tasks.len) {
+            if (threads.items.len == self.max_thread_count) {
+                const t = threads.items[thread_index];
+                t.join();
+                thread_index += 1;
+            }
+            const task = self.tasks[i];
+            var thread = try std.Thread.spawn(.{}, walk_directory_inner, .{allocator, self.dir.*, task.directory_name, task.index, self.result_buffer, self.max_thread_count == 1});
+            try threads.append(thread);
+            i += 1;
+        }
+        while (thread_index < threads.items.len) {
+            const t = threads.items[thread_index];
+            t.join();
+            thread_index += 1;
+        }
+    }
+};
+
+fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.IterableDir, directory_name: []const u8, index: usize, siblingBuffer: []?Entry, single_thread: bool) !void {
     var dir = try parent_dir.dir.openIterableDir(directory_name, .{ .access_sub_paths = false, .no_follow = true });
     defer dir.close();
     var it = dir.iterate();
@@ -189,23 +227,8 @@ fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.Iterabl
             },
         }
     }
-    // TODO: this needs to be parallelized
-    // Idea is to be able to to this without locking the buffer (since each has unique index in the preallocated array)
-    // TODO: hard limit the maximum number of parallel thread we allow to prevent fork bombing
-    var threads = ArrayList(std.Thread).init(allocator);
-    defer threads.deinit();
-    for (child_directories.items) |child| {
-        if (single_thread) {
-            try walk_directory_inner(allocator, dir, child.directory_name, child.index, buffer, single_thread);
-        }
-        else {
-            var thread = try std.Thread.spawn(.{}, walk_directory_inner, .{allocator, dir, child.directory_name, child.index, buffer, single_thread});
-            try threads.append(thread);
-        }
-    }
-    for (threads.items) |thread| {
-        thread.join();
-    }
+    var thread_pool = ThreadPool.init(if (single_thread) 1 else 4, child_directories.items, buffer.items, &dir);
+    try thread_pool.run(allocator);
     var entries = ArrayList(Entry).init(allocator);
     // TODO: use a iterator
     for (buffer.items) |entry| {
@@ -220,7 +243,7 @@ fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.Iterabl
         .size = size,
         .children = entries,
     } };
-    siblingBuffer.items[index] = directory_entry;
+    siblingBuffer[index] = directory_entry;
     std.mem.sort(Entry, entries.items, {}, entryLessThan);
 }
 
