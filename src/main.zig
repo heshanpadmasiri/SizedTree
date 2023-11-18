@@ -7,9 +7,8 @@ const FileKind = std.fs.File.Kind;
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
-    // FIXME:
-    // I belive we have some how got a double free
-    // defer _ = gpa.deinit();
+    // TODO: what to do with return value?
+    defer _ = gpa.deinit();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -84,11 +83,11 @@ fn print_and_deallocate_entries(allocator: std.mem.Allocator, entries: ArrayList
 
 fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) (std.os.WriteError || std.mem.Allocator.Error)!void {
     const prefix = try create_prefix(allocator, depth);
+    defer allocator.free(prefix);
     const size = try human_readable_size(allocator, entry.size());
     defer allocator.free(size);
     const basename = entry.basename();
-    // FIXME:
-    // defer allocator.free(basename);
+    defer allocator.free(basename);
     const spacer_text = try spacer(allocator, prefix.len, basename.len, size.len);
     defer allocator.free(spacer_text);
     try stdOut.writer().print("{s}-- {s}{s}{s}\n", .{ prefix, basename, spacer_text, size });
@@ -98,8 +97,8 @@ fn print_entry(allocator: std.mem.Allocator, entry: Entry, depth: usize) (std.os
         },
         else => {},
     }
-    allocator.free(prefix);
 }
+
 
 fn spacer(allocator: std.mem.Allocator, prefix_len: usize, basename_len: usize, size_len: usize) ![]const u8 {
     const total_len = prefix_len + "-- ".len + basename_len + size_len;
@@ -109,7 +108,7 @@ fn spacer(allocator: std.mem.Allocator, prefix_len: usize, basename_len: usize, 
     }
     var buffer = try allocator.alloc(u8, remainder);
     for (0..remainder) |i| {
-        buffer[i] = '.';
+        buffer[i] = if (i == 0) ' ' else '.';
     }
     return buffer;
 }
@@ -151,7 +150,7 @@ fn walk_directory(allocator: std.mem.Allocator, path: []const u8) !ArrayList(Ent
     var buffer = ArrayList(?Entry).init(allocator);
     defer buffer.deinit();
     try buffer.append(null);
-    try walk_directory_inner(allocator, dir, path, 0, buffer);
+    try walk_directory_inner(allocator, dir, try owned_heap_string(allocator, path), 0, buffer);
     var entries = ArrayList(Entry).init(allocator);
     // TODO: use a iterator
     for (buffer.items) |entry| {
@@ -173,11 +172,10 @@ fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.Iterabl
     var buffer = ArrayList(?Entry).init(allocator);
     defer buffer.deinit();
     var child_directories = ArrayList(DirectoryTrampoline).init(allocator);
+    defer child_directories.deinit();
     // TODO: Create a list to hold all directory entries
     while (try it.next()) |entry| {
-        // TODO: this needs to be parallelized
-        var basename = try allocator.alloc(u8, entry.name.len);
-        @memcpy(basename, entry.name.ptr);
+        var basename = try owned_heap_string(allocator, entry.name);
         switch (entry.kind) {
             FileKind.file => {
                 const size = try file_size(dir.dir, basename);
@@ -193,6 +191,8 @@ fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.Iterabl
             },
         }
     }
+    // TODO: this needs to be parallelized
+    // Idea is to be able to to this without locking the buffer (since each has unique index in the preallocated array)
     for (child_directories.items) |child| {
         try walk_directory_inner(allocator, dir, child.directory_name, child.index, buffer);
     }
@@ -212,6 +212,12 @@ fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.Iterabl
     } };
     siblingBuffer.items[index] = directory_entry;
     std.mem.sort(Entry, entries.items, {}, entryLessThan);
+}
+
+fn owned_heap_string(allocator: std.mem.Allocator, string: []const u8) ![]const u8 {
+    var buffer = try allocator.alloc(u8, string.len);
+    @memcpy(buffer, string.ptr);
+    return buffer;
 }
 
 fn file_size(dir: std.fs.Dir, file_name: []const u8) !usize {
