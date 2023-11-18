@@ -21,12 +21,14 @@ pub fn main() !void {
     // TODO: also allow controlling how deep we need the output to go
     // (ideally we shouldn't check for files deeper than that either)
     // FIXME: name too long (not sure what is causing it, other than handling deeply recursive directories)
-    if (n_args != 2) {
+    if ((n_args < 2) or (n_args > 3)) {
         try print_message_and_exit("Please provide a path to a file", 1);
     }
     const path = args[1];
+    // TODO: we should use some sort of thread pool to mitigate fork bombing our self
+    const single_threaded = (n_args == 3) and std.mem.eql(u8, args[2], "--single-threaded");
     // TODO: pass in a areana allocator
-    const entries = try walk_directory(allocator, path);
+    const entries = try walk_directory(allocator, path, single_threaded);
     try print_and_deallocate_entries(allocator, entries, 0);
 }
 
@@ -141,16 +143,13 @@ fn create_prefix(allocator: std.mem.Allocator, depth: usize) ![]const u8 {
     return prefix;
 }
 
-// TODO: walk directory should accept the array list as an argument and index in it
-// Then walk directory will update the index in it (this allows us to run the threads without locking)
-// But the first one don't know the index so we will split this walk_directory function to a top level one and inner one
-fn walk_directory(allocator: std.mem.Allocator, path: []const u8) !ArrayList(Entry) {
+fn walk_directory(allocator: std.mem.Allocator, path: []const u8, single_threaded: bool) !ArrayList(Entry) {
     var dir = try std.fs.cwd().openIterableDir(path, .{ .access_sub_paths = false, .no_follow = true });
     defer dir.close();
     var buffer = ArrayList(?Entry).init(allocator);
     defer buffer.deinit();
     try buffer.append(null);
-    try walk_directory_inner(allocator, dir, try owned_heap_string(allocator, path), 0, buffer);
+    try walk_directory_inner(allocator, dir, try owned_heap_string(allocator, path), 0, buffer, single_threaded);
     var entries = ArrayList(Entry).init(allocator);
     // TODO: use a iterator
     for (buffer.items) |entry| {
@@ -165,7 +164,7 @@ const DirectoryTrampoline = struct {
     directory_name: []const u8,
 };
 
-fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.IterableDir, directory_name: []const u8, index: usize, siblingBuffer: ArrayList(?Entry)) !void {
+fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.IterableDir, directory_name: []const u8, index: usize, siblingBuffer: ArrayList(?Entry), single_thread: bool) !void {
     var dir = try parent_dir.dir.openIterableDir(directory_name, .{ .access_sub_paths = false, .no_follow = true });
     defer dir.close();
     var it = dir.iterate();
@@ -173,7 +172,6 @@ fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.Iterabl
     defer buffer.deinit();
     var child_directories = ArrayList(DirectoryTrampoline).init(allocator);
     defer child_directories.deinit();
-    // TODO: Create a list to hold all directory entries
     while (try it.next()) |entry| {
         var basename = try owned_heap_string(allocator, entry.name);
         switch (entry.kind) {
@@ -193,8 +191,20 @@ fn walk_directory_inner(allocator: std.mem.Allocator, parent_dir: std.fs.Iterabl
     }
     // TODO: this needs to be parallelized
     // Idea is to be able to to this without locking the buffer (since each has unique index in the preallocated array)
+    // TODO: hard limit the maximum number of parallel thread we allow to prevent fork bombing
+    var threads = ArrayList(std.Thread).init(allocator);
+    defer threads.deinit();
     for (child_directories.items) |child| {
-        try walk_directory_inner(allocator, dir, child.directory_name, child.index, buffer);
+        if (single_thread) {
+            try walk_directory_inner(allocator, dir, child.directory_name, child.index, buffer, single_thread);
+        }
+        else {
+            var thread = try std.Thread.spawn(.{}, walk_directory_inner, .{allocator, dir, child.directory_name, child.index, buffer, single_thread});
+            try threads.append(thread);
+        }
+    }
+    for (threads.items) |thread| {
+        thread.join();
     }
     var entries = ArrayList(Entry).init(allocator);
     // TODO: use a iterator
